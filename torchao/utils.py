@@ -664,7 +664,6 @@ def _dispatch__torch_function__(cls, func, types, args=(), kwargs=None):
         ...
         __torch_function__ = classmethod(_dispatch__torch_function__)
     """
-    kwargs = {} if kwargs is None else kwargs
     if (
         hasattr(cls, "_TORCH_FN_TABLE")
         and cls in cls._TORCH_FN_TABLE
@@ -683,7 +682,6 @@ def _dispatch__torch_dispatch__(cls, func, types, args, kwargs):
         ...
         __torch_dispatch__ = classmethod(_dispatch__torch_dispatch__)
     """
-    kwargs = {} if kwargs is None else kwargs
 
     if (
         hasattr(cls, "_ATEN_OP_TABLE")

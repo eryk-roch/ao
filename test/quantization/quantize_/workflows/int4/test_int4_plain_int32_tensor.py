@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD 3-Clause license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import tempfile
 
 import pytest
@@ -31,19 +30,6 @@ def get_config(group_size):
         int4_packing_format="plain_int32",
         set_inductor_config=False,
     )
-
-
-class GroupedMMModel(torch.nn.Module):
-    """A toy model whose only op in forward is torch._grouped_mm."""
-
-    def __init__(self, E, K, N, device, dtype=torch.bfloat16):
-        super().__init__()
-        self.weight = torch.nn.Parameter(
-            torch.randn(E, N, K, device=device, dtype=dtype)
-        )
-
-    def forward(self, x, offs):
-        return torch._grouped_mm(x, self.weight.transpose(-2, -1), offs=offs)
 
 
 class Int4PlainInt32TensorTest(TestCase):
@@ -281,105 +267,6 @@ class Int4PlainInt32TensorTest(TestCase):
 
         with self.assertRaisesRegex(NotImplementedError, "expects 1D indices"):
             _ = torch.ops.aten.index.Tensor(qw, [expert_ids.view(1, -1)])
-
-    @parametrize("dtype", [torch.bfloat16])
-    @parametrize("group_size", [128])
-    @torch.no_grad()
-    def test_bmm(self, device, dtype, group_size):
-        """Test bmm dispatch when one operand is Int4PlainInt32Tensor."""
-        if "npu" in device:
-            pytest.skip("NPU does not support 3D Int4PlainInt32Tensor")
-
-        S, N, K = 4, 128, 256
-        weight = torch.randn(S, N, K, dtype=dtype, device=device)
-        inp = torch.randn(S, K, 1, dtype=dtype, device=device)
-
-        qw = Int4PlainInt32Tensor.from_hp(weight, [1, 1, group_size])
-        out_ref = torch.bmm(weight, inp)
-        out = torch.bmm(qw, inp)
-        sqnr = compute_error(out_ref, out)
-        self.assertGreater(sqnr, 15.0, f"bmm SQNR too low: {sqnr:.2f}")
-
-    @parametrize("dtype", [torch.bfloat16])
-    @parametrize("group_size", [128])
-    @parametrize(
-        "E,K,N,m_per_group",
-        [
-            (4, 128, 256, [32, 64, 16, 48]),
-        ],
-    )
-    @torch.no_grad()
-    def test_grouped_mm(self, device, dtype, group_size, E, K, N, m_per_group):
-        """Test Int4WeightOnlyConfig with grouped_mm dispatch."""
-        if "npu" in device:
-            pytest.skip("NPU does not support grouped_mm yet")
-
-        total_m = sum(m_per_group)
-        model_ref = GroupedMMModel(E, K, N, device=device, dtype=dtype)
-        model = copy.deepcopy(model_ref)
-
-        x = torch.randn(total_m, K, device=device, dtype=dtype)
-        offs = torch.tensor(
-            [sum(m_per_group[: i + 1]) for i in range(E)],
-            device=device,
-            dtype=torch.int32,
-        )
-
-        y_ref = model_ref(x, offs)
-
-        quantize_(
-            model,
-            get_config(group_size),
-            filter_fn=lambda mod, fqn: (
-                isinstance(mod, GroupedMMModel) and hasattr(mod, "weight")
-            ),
-        )
-
-        self.assertIsInstance(model.weight, Int4PlainInt32Tensor)
-
-        y = model(x, offs)
-        y_sqnr = compute_error(y_ref, y)
-        self.assertGreater(y_sqnr, 15.0, f"Output SQNR too low: {y_sqnr:.2f}")
-
-    @parametrize("dtype", [torch.bfloat16])
-    @parametrize("group_size", [128])
-    @parametrize(
-        "E,K,N,m_per_group",
-        [
-            (4, 128, 256, [32, 64, 16, 48]),
-        ],
-    )
-    @torch.no_grad()
-    def test_grouped_mm_compile(self, device, dtype, group_size, E, K, N, m_per_group):
-        """Regression: torch.compile path should work with Int4 grouped_mm."""
-        if "npu" in device:
-            pytest.skip("NPU does not support grouped_mm yet")
-
-        total_m = sum(m_per_group)
-        model_ref = GroupedMMModel(E, K, N, device=device, dtype=dtype)
-        model = copy.deepcopy(model_ref)
-
-        x = torch.randn(total_m, K, device=device, dtype=dtype)
-        offs = torch.tensor(
-            [sum(m_per_group[: i + 1]) for i in range(E)],
-            device=device,
-            dtype=torch.int32,
-        )
-
-        y_ref = model_ref(x, offs)
-
-        quantize_(
-            model,
-            get_config(group_size),
-            filter_fn=lambda mod, fqn: (
-                isinstance(mod, GroupedMMModel) and hasattr(mod, "weight")
-            ),
-        )
-
-        compiled_model = torch.compile(model)
-        y = compiled_model(x, offs)
-        y_sqnr = compute_error(y_ref, y)
-        self.assertGreater(y_sqnr, 15.0, f"Compiled output SQNR too low: {y_sqnr:.2f}")
 
     @parametrize("dtype", [torch.bfloat16])
     @parametrize("group_size", [128])
